@@ -9,7 +9,6 @@ DB_CONFIG = {
     'password': 'Vasala@#66118'
 }
 
-
 def create_connection():
     return psycopg2.connect(**DB_CONFIG)
 

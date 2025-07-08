@@ -19,20 +19,30 @@ lib64/
 parts/
 sdist/
 var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+MANIFEST
 
 # Virtual environments
-env/
 venv/
 ENV/
-env.bak/
-venv.bak/
+env/
+.venv/
+.ENV/
+.env/
+.venv/
 
-# VS Code and PyCharm
-.vscode/
-.idea/
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
 
 # Unit test / coverage reports
 htmlcov/
@@ -45,29 +55,37 @@ nosetests.xml
 coverage.xml
 *.cover
 *.py,cover
+.hypothesis/
+.pytest_cache/
 
 # Jupyter Notebook
 .ipynb_checkpoints
 
-# PyInstaller
-*.manifest
-*.spec
+# pyenv
+.python-version
 
 # mypy
 .mypy_cache/
 .dmypy.json
 dmypy.json
 
-# pyright
-.pyright/
+# Pyre type checker
+.pyre/
 
-# Logs
-*.log
+# VS Code
+.vscode/
 
-# SQLite and other databases
-*.sqlite3
+# MacOS
+.DS_Store
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Database files
 *.db
 
-# System files
-.DS_Store
-Thumbs.db
+# FAISS index files
+*.faiss
+*.pkl 
