@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Processing Test Interface</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .upload-section {
+            border: 2px dashed #ccc;
+            padding: 40px;
+            text-align: center;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            background-color: #fafafa;
+        }
+        .upload-section:hover {
+            border-color: #007bff;
+            background-color: #f0f8ff;
+        }
+        input[type="file"] {
+            margin: 10px 0;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            width: 100%;
+            max-width: 400px;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 10px 5px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        .result-section {
+            margin-top: 30px;
+            padding: 20px;
+            border-radius: 10px;
+            display: none;
+        }
+        .success {
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+        .error {
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+        .preview-item {
+            background: white;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+            border-left: 4px solid #007bff;
+        }
+        .preview-question {
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        .preview-answer {
+            color: #666;
+            font-size: 14px;
+        }
+        .loading {
+            text-align: center;
+            color: #666;
+            font-style: italic;
+        }
+        .stats {
+            background: #e9ecef;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 15px 0;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>PDF to CSV Processing Test</h1>
+        
+        <div class="upload-section">
+            <h3>Upload PDF File</h3>
+            <p>Select a PDF file containing tabular data or text to test the conversion process.</p>
+            <input type="file" id="pdfFile" accept=".pdf" />
+            <br>
+            <button onclick="testPdfProcessing()" id="processBtn">Process PDF</button>
+            <button onclick="clearResults()" id="clearBtn">Clear Results</button>
+        </div>
+        
+        <div id="resultSection" class="result-section">
+            <div id="resultContent"></div>
+        </div>
+    </div>
+
+    <script>
+        async function testPdfProcessing() {
+            const fileInput = document.getElementById('pdfFile');
+            const processBtn = document.getElementById('processBtn');
+            const resultSection = document.getElementById('resultSection');
+            const resultContent = document.getElementById('resultContent');
+            
+            if (!fileInput.files[0]) {
+                alert('Please select a PDF file first.');
+                return;
+            }
+            
+            const file = fileInput.files[0];
+            if (!file.name.toLowerCase().endsWith('.pdf')) {
+                alert('Please select a PDF file.');
+                return;
+            }
+            
+            // Show loading state
+            processBtn.disabled = true;
+            processBtn.textContent = 'Processing...';
+            resultSection.style.display = 'block';
+            resultContent.innerHTML = '<div class="loading">Processing PDF file...</div>';
+            
+            const formData = new FormData();
+            formData.append('file', file);
+            
+            try {
+                const response = await fetch('/admin/test-pdf', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const result = await response.json();
+                
+                if (response.ok) {
+                    displaySuccess(result);
+                } else {
+                    displayError(result.detail || 'Processing failed');
+                }
+            } catch (error) {
+                displayError('Network error: ' + error.message);
+            } finally {
+                processBtn.disabled = false;
+                processBtn.textContent = 'Process PDF';
+            }
+        }
+        
+        function displaySuccess(result) {
+            const resultContent = document.getElementById('resultContent');
+            
+            let html = `
+                <div class="success">
+                    <h3>✅ ${result.message}</h3>
+                    <div class="stats">
+                        <strong>Total Q&A Pairs:</strong> ${result.total_rows}<br>
+                        <strong>Generated File:</strong> ${result.csv_filename}
+                    </div>
+                    <h4>Preview of Extracted Content:</h4>
+            `;
+            
+            if (result.preview && result.preview.length > 0) {
+                result.preview.forEach((item, index) => {
+                    html += `
+                        <div class="preview-item">
+                            <div class="preview-question">${index + 1}. ${item.question}</div>
+                            <div class="preview-answer">${item.concise_answer}</div>
+                            ${item.has_details ? '<small style="color: #28a745;">✓ Has detailed information</small>' : ''}
+                        </div>
+                    `;
+                });
+            } else {
+                html += '<p>No content could be extracted from the PDF.</p>';
+            }
+            
+            html += '</div>';
+            resultContent.innerHTML = html;
+        }
+        
+        function displayError(message) {
+            const resultContent = document.getElementById('resultContent');
+            resultContent.innerHTML = `
+                <div class="error">
+                    <h3>❌ Processing Failed</h3>
+                    <p>${message}</p>
+                </div>
+            `;
+        }
+        
+        function clearResults() {
+            document.getElementById('resultSection').style.display = 'none';
+            document.getElementById('pdfFile').value = '';
+        }
+        
+        // Add drag and drop functionality
+        const uploadSection = document.querySelector('.upload-section');
+        
+        uploadSection.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadSection.style.borderColor = '#007bff';
+            uploadSection.style.backgroundColor = '#f0f8ff';
+        });
+        
+        uploadSection.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            uploadSection.style.borderColor = '#ccc';
+            uploadSection.style.backgroundColor = '#fafafa';
+        });
+        
+        uploadSection.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadSection.style.borderColor = '#ccc';
+            uploadSection.style.backgroundColor = '#fafafa';
+            
+            const files = e.dataTransfer.files;
+            if (files.length > 0 && files[0].name.toLowerCase().endsWith('.pdf')) {
+                document.getElementById('pdfFile').files = files;
+            } else {
+                alert('Please drop a PDF file.');
+            }
+        });
+    </script>
+</body>
+</html> 

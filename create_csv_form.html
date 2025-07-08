@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Create CSV for FAQ Bot</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #555;
+        }
+        input[type="text"], textarea {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+        textarea {
+            height: 150px;
+            resize: vertical;
+        }
+        .example {
+            background: #f9f9f9;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 10px;
+            font-size: 12px;
+            color: #666;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            padding: 12px 30px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            width: 100%;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 5px;
+            display: none;
+        }
+        .success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Create CSV for FAQ Bot</h1>
+        
+        <form id="csvForm">
+            <div class="form-group">
+                <label for="filename">CSV Filename:</label>
+                <input type="text" id="filename" name="filename" placeholder="nature_faq.csv" required>
+                <div class="example">
+                    Example: nature_faq.csv, ai_questions.csv, etc.
+                </div>
+            </div>
+            
+            <div class="form-group">
+                <label for="questions">Questions (one per line):</label>
+                <textarea id="questions" name="questions" placeholder="What is nature?
+How does nature support the environment?
+What are the benefits of forests?" required></textarea>
+                <div class="example">
+                    Enter each question on a new line. These will be the searchable questions.
+                </div>
+            </div>
+            
+            <div class="form-group">
+                <label for="answers">Answers (one per line, matching questions):</label>
+                <textarea id="answers" name="answers" placeholder="Nature is the physical world and everything in it that is not made by humans.
+Nature supports the environment by providing essential resources like air, water, and food.
+Forests provide oxygen, prevent soil erosion, and serve as habitats for wildlife." required></textarea>
+                <div class="example">
+                    Enter each answer on a new line. The number of answers must match the number of questions.
+                </div>
+            </div>
+            
+            <div class="form-group">
+                <label for="details">Detailed Answers (optional, one per line):</label>
+                <textarea id="details" name="details" placeholder="Nature is the physical world and everything in it that is not made by humans. It includes plants, animals, the landscape, and other features and products of the earth. Nature provides essential resources and ecosystem services such as air, water, food, and shelter."></textarea>
+                <div class="example">
+                    Optional detailed answers. If not provided, the regular answers will be used for details.
+                </div>
+            </div>
+            
+            <button type="submit">Create CSV File</button>
+        </form>
+        
+        <div id="result" class="result"></div>
+    </div>
+
+    <script>
+        document.getElementById('csvForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const formData = new FormData();
+            formData.append('filename', document.getElementById('filename').value);
+            formData.append('questions', document.getElementById('questions').value);
+            formData.append('answers', document.getElementById('answers').value);
+            formData.append('details', document.getElementById('details').value);
+            
+            const resultDiv = document.getElementById('result');
+            resultDiv.style.display = 'block';
+            resultDiv.className = 'result';
+            resultDiv.innerHTML = 'Creating CSV file...';
+            
+            try {
+                const response = await fetch('/admin/create-manual-csv', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    resultDiv.className = 'result success';
+                    resultDiv.innerHTML = `
+                        <h3>✅ Success!</h3>
+                        <p>${data.message}</p>
+                        <p>File: ${data.filename}</p>
+                        <p>The index has been rebuilt with the new content.</p>
+                    `;
+                } else {
+                    resultDiv.className = 'result error';
+                    resultDiv.innerHTML = `
+                        <h3>❌ Error</h3>
+                        <p>${data.detail}</p>
+                    `;
+                }
+            } catch (error) {
+                resultDiv.className = 'result error';
+                resultDiv.innerHTML = `
+                    <h3>❌ Error</h3>
+                    <p>Failed to create CSV file: ${error.message}</p>
+                `;
+            }
+        });
+    </script>
+</body>
+</html> 
