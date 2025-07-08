@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Query
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Query, Body
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
@@ -22,6 +22,9 @@ import boto3
 import json
 import re
 import urllib.parse
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 app = FastAPI()
 
@@ -296,28 +299,30 @@ def delete_file(filename: str):
 
 
 @app.get("/chatusers/list")
-def get_users_list():
+def get_userschat_list():
     if not is_privileged_authenticated():
         raise HTTPException(status_code=401, detail="Not authenticated.")
     
     conn = create_connection()
     cursor = conn.cursor()
 
-    # Get recent users with extracted date and time (not full timestamp)
     cursor.execute('''
-        SELECT DISTINCT ON (u.email)
+        SELECT
             u.email,
             u.phone,
-            c.chat_date,
-            c.chat_time,
+            latest.chat_date,
+            latest.chat_time,
             u.status,
             u.description
-          
         FROM users u
-        JOIN chat_history c ON u.email = c.email
-        ORDER BY u.email DESC ,c.chat_date DESC,c.chat_time DESC
-        LIMIT 100
+        LEFT JOIN (
+            SELECT DISTINCT ON (email) email, chat_date, chat_time
+            FROM chat_history
+            ORDER BY email, chat_date DESC, chat_time DESC
+        ) latest ON u.email = latest.email
+        ORDER BY latest.chat_date DESC NULLS LAST, latest.chat_time DESC NULLS LAST
     ''')
+    
     users = cursor.fetchall()
     conn.close()
 
@@ -328,13 +333,12 @@ def get_users_list():
                 "phone": u[1],
                 "chat_date": datetime.strptime(str(u[2]), "%Y-%m-%d").strftime("%d/%m/%Y") if u[2] else None,
                 "chat_time": datetime.strptime(str(u[3]), "%H:%M:%S.%f").strftime("%H:%M") if u[3] else None,
-               # "chat_date": u[2],
-               # "chat_time": u[3],
                 "status": u[4],
                 "description": u[5]
             } for u in users
         ]
     }
+
 
 
 @app.get("/users/list")
@@ -399,10 +403,11 @@ def get_user_history(email: str = Query(...)):
 def user_register(
     email: str = Form(...),
     phone: str = Form(...),
-    country: str = Form('India')
-):
+    country: str = Form('India'),
+    status: str = Form('pending')
+    ):
     if not user_exists(email, phone):
-        save_user_info(email, phone, country)
+        save_user_info(email, phone, country,status)
     return {"success": True, "message": "User registered."}
 
 # @app.post("/chat")
@@ -418,7 +423,16 @@ def user_register(
         "good morning": "Good morning! How can I assist you today?",
         "how are you": "I'm just a bot, but I'm here to help you! How can I assist you?",
         "who are you": "I'm your assistant bot, here to help you with your queries!",
-        "how you help me": "I can answer your questions from uploaded documents. How can I help you today?"
+        "how you help me": "I can answer your questions from uploaded documents. How can I help you today?",
+        "okay": "ok! How can I help you? ",
+        "ok": "Alright! Let me know how I can help.",
+        "hmmha": "Got it! Feel free to ask anything.",
+        "thank you": "You're welcome! Let me know if there's anything else I can assist you with.",
+        "thankyou": "You're very welcome! Happy to help.",
+        "thanks": "You're most welcome! I'm here if you need anything else.",
+        "thank u": "You're welcome! Let me know if you need anything more.",
+        "thx": "You're welcome!",
+        "ty": "You're welcome!"
     }
 
     normalized_query = user_query.strip().lower()
@@ -639,33 +653,8 @@ def search_branch_in_data(location, query):
 @app.post("/chat")
 def chat(email: str = Form(...), user_query: str = Form(...)):
     user_query_lower = user_query.lower()
-    # Check for branch queries first
-    if any(keyword in user_query_lower for keyword in ["branch", "branches", "location", "locations", "office", "offices"]):
-        print(f"Branch query detected: {user_query}")
-        location = extract_location_from_query(user_query)
-        print(f"Extracted location: {location}")
-        
-        if location:
-            # Search for branch information in uploaded data
-            branch_info = search_branch_in_data(location, user_query)
-            print(f"Branch info result: {branch_info}")
-            if branch_info:
-                save_interaction(email, user_query, branch_info)
-                return {
-                    "long_desc": branch_info,
-                    "more_available": False
-                }
-        else:
-            # General branch query
-            branch_info = search_branch_in_data(None, user_query)
-            print(f"General branch info result: {branch_info}")
-            if branch_info:
-                save_interaction(email, user_query, branch_info)
-                return {
-                    "long_desc": branch_info,
-                    "more_available": False
-                }
 
+    # Define greetings
     greetings = {
         "hi": "Hi! How can I assist you today?",
         "hello": "Hello! How can I help you?",
@@ -677,11 +666,10 @@ def chat(email: str = Form(...), user_query: str = Form(...)):
         "ok": "Ok, how can I help you today?",
         "okay": "Ok, how can I help you today?",
         "thanks": "You're welcome! How can I help you today?",
-        "thank you so much": "You're welcome! How can I help you today?",
-        "thanks so much": "You're welcome! How can I help you today?",
-        "thank you so much for your help": "You're welcome! How can I help you today?",
-        "thanks so much for your help": "You're welcome! How can I help you today?",
-        "thank you so much for your help": "You're welcome! How can I help you today?"
+        "thank you": "You're welcome! Let me know if there's anything else I can assist you with.",
+        "thank u": "You're welcome!",
+        "thx": "You're welcome!",
+        "ty": "You're welcome!"
     }
 
     normalized_query = user_query.strip().lower()
@@ -689,121 +677,97 @@ def chat(email: str = Form(...), user_query: str = Form(...)):
         polite_reply = greetings[normalized_query]
         save_interaction(email, user_query, polite_reply)
         return {
-            #"short_desc": polite_reply,
             "long_desc": polite_reply,
             "more_available": False 
         }
 
-    # Check if files exist
+    # --- Handle branch queries ---
+    if any(keyword in user_query_lower for keyword in ["branch", "branches", "location", "locations", "office", "offices"]):
+        location = extract_location_from_query(user_query)
+        if location:
+            branch_info = search_branch_in_data(location, user_query)
+        else:
+            branch_info = search_branch_in_data(None, user_query)
+        if branch_info:
+            save_interaction(email, user_query, branch_info)
+            return {"long_desc": branch_info, "more_available": False}
+
+    # --- Check if files exist ---
     data_dir = "data"
     all_files = [f for f in os.listdir(data_dir) if os.path.isfile(os.path.join(data_dir, f))]
     if not all_files:
         msg = "No files available. Please upload documents for me to assist you."
         save_interaction(email, user_query, msg)
-        return {
-            "short_desc": msg,
-            "long_desc": None,
-            "more_available": False
-        }
+        return {"short_desc": msg, "long_desc": None, "more_available": False}
 
-    # Always reinitialize index based on current data
+    # --- Initialize search index ---
     bedrock_indexer = initialize_bedrock_index()
     results = bedrock_indexer.search(user_query, k=3, threshold=0.15)
 
     if results:
         best_doc, _ = results[0]
-        short_ans = best_doc.get('answer') or best_doc.get('text') or ""
-        long_ans = best_doc.get('details') or best_doc.get('text') or ""
+        source_type = best_doc.get('source')
 
-        trimmed_short = format_points(short_ans, 60) if is_list_like(short_ans) else trim_to_tokens(short_ans, 60)
-        trimmed_long = trim_to_tokens(long_ans, 200)
-
-
-        if results:
-
-            best_doc, _ = results[0]
-            if best_doc.get('source') == 'csv':
-                # --- CSV logic (keep as is) ---
-                short_ans = best_doc.get('answer') or best_doc.get('text') or ""
-                long_ans = best_doc.get('details') or best_doc.get('text') or ""
-                trimmed_short = format_points(short_ans, 60) if is_list_like(short_ans) else trim_to_tokens(short_ans, 60)
-                trimmed_long = trim_to_tokens(long_ans, 200)
-                if not trimmed_long or trimmed_long.lower() == trimmed_short.lower():
-                    context = "\n\n".join([
-                        doc.get('details') or doc.get('answer') or doc.get('text') or ""
-                        for doc, _ in results
-                    ]) or trimmed_short
-                    try:
-                        generated_long = generate_answer_with_bedrock(user_query, context)
-                        trimmed_long = trim_to_tokens(generated_long, 300)
-                    except:
-                        trimmed_long = None
-                save_interaction(email, user_query, trimmed_short)
-                return {
-                    #"short_desc": trimmed_short,
-                    "long_desc": trimmed_short+trimmed_long,
-
-                    "more_available": bool(trimmed_long)
-                }
-            else:
-                # --- PDF logic (improved) ---
-                seen = set()
-                context_chunks = []
-                for doc, _ in results:
-                    txt = doc.get('text', '')
-                    if txt not in seen and len(context_chunks) < 3:
-                        context_chunks.append(txt)
-                        seen.add(txt)
-                context = "\n\n".join(context_chunks)
-                short_ans = context_chunks[0] if context_chunks else ""
-                trimmed_short = format_points(short_ans, 60) if is_list_like(short_ans) else trim_to_tokens(short_ans, 60)
-                trimmed_long = trim_to_tokens(context, 200)
-                if not trimmed_long or trimmed_long.lower() == trimmed_short.lower():
-                    try:
-                        generated_long = generate_answer_with_bedrock(user_query, context)
-                        trimmed_long = trim_to_tokens(generated_long, 300)
-                    except:
-                        trimmed_long = None
-                save_interaction(email, user_query, trimmed_short)
-                return {
-                    #"short_desc":None,
-                    "long_desc": trimmed_long,
-                    "more_available": bool(trimmed_long)
-                }
-
-    else:
-        topics_str = ", ".join([extract_main_word(f) for f in all_files])
-        msg = f"Sorry, I couldn't find an answer to that."# I have data only on: {topics_str}"
-        save_interaction(email, user_query, msg)
-        return {
-            #"short_desc": None,
-            "long_desc": msg,
-            "more_available": False
-        }
-
-    # --- Automatic summary update logic ---
-    # 1. Count the number of questions for this user
-    conn = create_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM chat_history WHERE email = %s", (email,))
-    question_count = cursor.fetchone()[0]
-    conn.close()
-
-    # 2. If 4 or more, update summary
-    if question_count >= 1:
-        # Try to get phone from the chat request, or fetch from users table if not provided
-        user_phone = None
-        if 'phone' in locals() and phone:
-            user_phone = phone
+        if source_type == 'csv':
+            short_ans = best_doc.get('answer') or best_doc.get('text') or ""
+            long_ans = best_doc.get('details') or best_doc.get('text') or ""
+            trimmed_short = format_points(short_ans, 60) if is_list_like(short_ans) else trim_to_tokens(short_ans, 60)
+            trimmed_long = trim_to_tokens(long_ans, 200)
+            if not trimmed_long or trimmed_long.lower() == trimmed_short.lower():
+                context = "\n\n".join([
+                    doc.get('details') or doc.get('answer') or doc.get('text') or ""
+                    for doc, _ in results
+                ]) or trimmed_short
+                try:
+                    generated_long = generate_answer_with_bedrock(user_query, context)
+                    trimmed_long = trim_to_tokens(generated_long, 300)
+                except:
+                    trimmed_long = None
+            save_interaction(email, user_query, trimmed_short)
+            return {"long_desc": trimmed_short + trimmed_long, "more_available": bool(trimmed_long)}
+        
         else:
-            conn = create_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT phone FROM users WHERE email = %s", (email,))
-            result = cursor.fetchone()
-            conn.close()
-            user_phone = result[0] if result else None
-        if user_phone:
-            update_user_interest_summary(email)
+            # PDF logic
+            seen = set()
+            context_chunks = []
+            for doc, _ in results:
+                txt = doc.get('text', '')
+                if txt not in seen and len(context_chunks) < 3:
+                    context_chunks.append(txt)
+                    seen.add(txt)
+            context = "\n\n".join(context_chunks)
+            short_ans = context_chunks[0] if context_chunks else ""
+            trimmed_short = format_points(short_ans, 60) if is_list_like(short_ans) else trim_to_tokens(short_ans, 60)
+            trimmed_long = trim_to_tokens(context, 200)
+            if not trimmed_long or trimmed_long.lower() == trimmed_short.lower():
+                try:
+                    generated_long = generate_answer_with_bedrock(user_query, context)
+                    trimmed_long = trim_to_tokens(generated_long, 300)
+                except:
+                    trimmed_long = None
+            save_interaction(email, user_query, trimmed_short)
+            return {"long_desc": trimmed_long, "more_available": bool(trimmed_long)}
+    
+    else:
+        msg = "Sorry, I couldn't find an answer to that."
+        save_interaction(email, user_query, msg)
+        return {"long_desc": msg, "more_available": False}
+
+    # --- Trigger summary if this was a meaningful question ---
+    is_meaningful = not (normalized_query in greetings)
+    if is_meaningful:
+        conn = create_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM chat_history WHERE email = %s", (email,))
+        question_count = cursor.fetchone()[0]
+        conn.close()
+        print(f"how many counts {question_count}")
+        if question_count >= 2:
+            try:
+                generate_summary_internal(email)
+                print(f"Summary updated for {email}")
+            except Exception as e:
+                print(f"Error updating summary for {email}: {str(e)}")
 
 @app.get("/user/count")
 def user_count():
@@ -1128,30 +1092,37 @@ def update_users(
     finally:
         conn.close()
 
-# def update_user_interest_summary(email):
-#     print(f"[DEBUG] Updating summary for: {email}")
-#     conn = create_connection()
-#     cursor = conn.cursor()
-#     cursor.execute("SELECT user_query FROM chat_history WHERE email = %s", (email,))
-#     queries = [row[0] for row in cursor.fetchall()]
-#     conn.close()
+@app.post("/chat/summary")
+def generate_summary_internal(email):
+    # Step 1: Fetch user's chat history
+    conn = create_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_query FROM chat_history WHERE email = %s", (email,))
+    chat_rows = cursor.fetchall()
+    conn.close()
 
-#     print(f"[DEBUG] Found {len(queries)} queries for {email}")
+    if not chat_rows:
+        return None
 
-#     if not queries:
-#         summary_final = "Not Interested"
-#     else:
-#         # TEMP: Hardcode summary for debugging
-#         summary_final = "Interested"
-#         print(f"[DEBUG] (TEMP) Setting summary_final to: {summary_final}")
+    # Step 2: Combine chat queries into a single text blob
+    chat_text = " ".join([row[0] for row in chat_rows]).lower()
 
-#     conn = create_connection()
-#     cursor = conn.cursor()
-#     print(f"[DEBUG] Executing update for {email} with summary: {summary_final}")
-#     cursor.execute(
-#         "UPDATE users SET summary = %s WHERE email = %s",
-#         (summary_final, email)
-#     )
-#     print(f"[DEBUG] Update executed, rows affected: {cursor.rowcount}")
-#     conn.commit()
-#     conn.close()
+    # Step 3: Simple rule-based tagging (can replace with LLM later)
+    if any(word in chat_text for word in ["price", "cost", "buy", "purchase", "quotation", "quote"]):
+        summary = "User appears to be interested in purchasing a lift."
+    elif any(word in chat_text for word in ["problem", "issue", "repair", "not working", "support"]):
+        summary = "User is mostly making support-related queries."
+    elif any(word in chat_text for word in ["branch", "location", "city", "state", "office"]):
+        summary = "User is enquiring about branches and locations."
+    else:
+        summary = "User is asking general questions."
+
+    # Step 4: Update the users table
+    conn = create_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET summary = %s WHERE email = %s", (summary, email))
+    conn.commit()
+    conn.close()
+
+    return {"email": email, "summary": summary}
+

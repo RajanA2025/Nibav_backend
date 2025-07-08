@@ -39,12 +39,12 @@ def setup_database():
     conn.commit()
     conn.close()
 
-def save_user_info(email, phone, country):
+def save_user_info(email, phone, country, status):
     conn = create_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO users (email, phone, country) VALUES (%s, %s, %s)
-    """, (email, phone, country))
+        INSERT INTO users (email, phone, country, status) VALUES (%s, %s, %s, %s)
+    """, (email, phone, country, status))
     conn.commit()
     conn.close()
 
