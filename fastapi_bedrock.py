@@ -387,7 +387,6 @@ def get_users_list():
     }
 
 
-
 @app.get("/users/history")
 def get_user_history(email: str = Query(...)):
     if not is_privileged_authenticated():
@@ -424,6 +423,7 @@ def user_register(
     # 1. Handle greetings and small talk
     greetings = {
         "hi": "Hi! How can I assist you today?",
+        "hii":"Hi! How can I assist you today?",
         "Hi there": "Hi! How can I assist you today?",
         "hello": "Hello! How can I help you?",
         "hey": "Hey there! How can I help you?",
@@ -624,12 +624,29 @@ def search_branch_in_data(location, query):
             if matching_branches:
                 if len(matching_branches) == 1:
                     branch = matching_branches[0]
-                    return f"Nibav Lifts has a branch in {branch['city']}, {branch['state']}. Address: {branch['address']}. Phone: {branch['phone']}. Email: {branch['email']}."
+                    search_url = f"https://www.bing.com/search?q=nibav+lifts+{branch['city'].lower().replace(' ', '+')}"
+                    return (
+                        f"Nibav Lifts has a branch in {branch['city']}, {branch['state']}.\n"
+                        f"Address: {branch['address']}.\n"
+                        f"Phone: {branch['phone']}.\n"
+                        f"Email: {branch['email']}.\n"
+                        f"More info: {search_url}"
+                    )
                 else:
                     result = f"Nibav Lifts has {len(matching_branches)} branches in {location.title()}:\n"
                     for i, branch in enumerate(matching_branches, 1):
                         result += f"{i}. {branch['city']}, {branch['state']} - {branch['address']}. Phone: {branch['phone']}\n"
+                    search_url = f"https://www.bing.com/search?q=nibav+lifts+{location.lower().replace(' ', '+')}"
+                    result += f"\nFor more details, visit : {search_url}"
                     return result
+                # if len(matching_branches) == 1:
+                #     branch = matching_branches[0]
+                #     return f"Nibav Lifts has a branch in {branch['city']}, {branch['state']}. Address: {branch['address']}. Phone: {branch['phone']}. Email: {branch['email']}."
+                # else:
+                #     result = f"Nibav Lifts has {len(matching_branches)} branches in {location.title()}:\n"
+                #     for i, branch in enumerate(matching_branches, 1):
+                #         result += f"{i}. {branch['city']}, {branch['state']} - {branch['address']}. Phone: {branch['phone']}\n"
+                #     return result
             else:
                 return (
                     f"It appears there are no Nibav lift branches currently in {location.title()}. "
@@ -664,6 +681,8 @@ def chat(email: str = Form(...), user_query: str = Form(...)):
     # Define greetings
     greetings = {
         "hi": "Hi! How can I assist you today?",
+        "hii":"Hi! How can I assist you today?",
+        "Hi": "Hi! How can I assist you today?",
         "hello": "Hello! How can I help you?",
         "hey": "Hey there! How can I help you?",
         "good morning": "Good morning! How can I assist you today?",
@@ -696,7 +715,7 @@ def chat(email: str = Form(...), user_query: str = Form(...)):
             save_interaction(email, user_query, branch_info)
             # ✅ Check and trigger summary
             update_summary_if_needed(email)
-            return {"long_desc": branch_info, "more_available": False}
+            return {"long_desc": branch_info }  #, "more_available": False}
 
     # --- Check if files exist ---
     data_dir = "data"
@@ -897,7 +916,6 @@ def chat_counts():
     except Exception as e:
         print("Analytics error:", e)
         return {"error": str(e)} 
-
 @app.post("/user/create")
 def create_sales_person(
     name: str = Form(...),
