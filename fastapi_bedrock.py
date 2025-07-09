@@ -313,7 +313,9 @@ def get_userschat_list():
             latest.chat_date,
             latest.chat_time,
             u.status,
-            u.description
+            u.description,
+            u.updated_by,
+            u.updated_at
         FROM users u
         LEFT JOIN (
             SELECT DISTINCT ON (email) email, chat_date, chat_time
@@ -334,7 +336,9 @@ def get_userschat_list():
                 "chat_date": datetime.strptime(str(u[2]), "%Y-%m-%d").strftime("%d/%m/%Y") if u[2] else None,
                 "chat_time": datetime.strptime(str(u[3]), "%H:%M:%S.%f").strftime("%H:%M") if u[3] else None,
                 "status": u[4],
-                "description": u[5]
+                "description": u[5],
+                "updated_by": u[6],
+                "updated_at": u[7].isoformat() if u[7] else None
             } for u in users
         ]
     }
@@ -678,18 +682,17 @@ def chat(email: str = Form(...), user_query: str = Form(...)):
         save_interaction(email, user_query, polite_reply)
         return {
             "long_desc": polite_reply,
-            "more_available": False 
+            "more_available": False
         }
 
     # --- Handle branch queries ---
     if any(keyword in user_query_lower for keyword in ["branch", "branches", "location", "locations", "office", "offices"]):
         location = extract_location_from_query(user_query)
-        if location:
-            branch_info = search_branch_in_data(location, user_query)
-        else:
-            branch_info = search_branch_in_data(None, user_query)
+        branch_info = search_branch_in_data(location, user_query) if location else search_branch_in_data(None, user_query)
         if branch_info:
             save_interaction(email, user_query, branch_info)
+            # ✅ Check and trigger summary
+            update_summary_if_needed(email)
             return {"long_desc": branch_info, "more_available": False}
 
     # --- Check if files exist ---
@@ -698,6 +701,7 @@ def chat(email: str = Form(...), user_query: str = Form(...)):
     if not all_files:
         msg = "No files available. Please upload documents for me to assist you."
         save_interaction(email, user_query, msg)
+        update_summary_if_needed(email)
         return {"short_desc": msg, "long_desc": None, "more_available": False}
 
     # --- Initialize search index ---
@@ -724,10 +728,10 @@ def chat(email: str = Form(...), user_query: str = Form(...)):
                 except:
                     trimmed_long = None
             save_interaction(email, user_query, trimmed_short)
+            update_summary_if_needed(email)
             return {"long_desc": trimmed_short + trimmed_long, "more_available": bool(trimmed_long)}
-        
+
         else:
-            # PDF logic
             seen = set()
             context_chunks = []
             for doc, _ in results:
@@ -746,28 +750,34 @@ def chat(email: str = Form(...), user_query: str = Form(...)):
                 except:
                     trimmed_long = None
             save_interaction(email, user_query, trimmed_short)
+            update_summary_if_needed(email)
             return {"long_desc": trimmed_long, "more_available": bool(trimmed_long)}
-    
+
     else:
         msg = "Sorry, I couldn't find an answer to that."
         save_interaction(email, user_query, msg)
+        update_summary_if_needed(email)
         return {"long_desc": msg, "more_available": False}
 
-    # --- Trigger summary if this was a meaningful question ---
-    is_meaningful = not (normalized_query in greetings)
-    if is_meaningful:
+
+
+
+
+def update_summary_if_needed(email):
+    try:
         conn = create_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM chat_history WHERE email = %s", (email,))
-        question_count = cursor.fetchone()[0]
+        count = cursor.fetchone()[0]
         conn.close()
-        print(f"how many counts {question_count}")
-        if question_count >= 2:
-            try:
-                generate_summary_internal(email)
-                print(f"Summary updated for {email}")
-            except Exception as e:
-                print(f"Error updating summary for {email}: {str(e)}")
+
+        if count >= 2:
+            print(f"Triggering summary for {email}...")
+            generate_summary_internal(email)
+    except Exception as e:
+        print(f"Summary update error: {e}")
+
+
 
 @app.get("/user/count")
 def user_count():
@@ -892,8 +902,8 @@ def create_sales_person(
     password: str = Form(...),
     role: str = Form(...)
 ):
-    if not is_privileged_authenticated() or session_state.get("role", "").lower() != "admin":
-        raise HTTPException(status_code=403, detail="Only admin can create sales persons.")
+    if not is_privileged_authenticated() or session_state.get("role", "").lower() not in ["admin", "sales"]:
+        raise HTTPException(status_code=403, detail="Only admin or sales can create sales persons.")
     conn = create_connection()
     cursor = conn.cursor()
     try:
@@ -917,8 +927,8 @@ def update_sales_person(
     password: str = Form(None),
     role: str = Form(None)
 ):
-    if not is_privileged_authenticated() or session_state.get("role", "").lower() != "admin":
-        raise HTTPException(status_code=403, detail="Only admin can update sales persons.")
+    if not is_privileged_authenticated() or session_state.get("role", "").lower() not in ["admin", "sales"]:
+        raise HTTPException(status_code=403, detail="Only admin or sales can update sales persons.")
     conn = create_connection()
     cursor = conn.cursor()
     try:
@@ -951,8 +961,8 @@ def update_sales_person(
 
 @app.delete("/user/delete")
 def delete_sales_person(email: str = Form(...)):
-    if not is_privileged_authenticated() or session_state.get("role", "").lower() != "admin":
-        raise HTTPException(status_code=403, detail="Only admin can delete sales persons.")
+    if not is_privileged_authenticated() or session_state.get("role", "").lower() not in ["admin", "sales"]:
+        raise HTTPException(status_code=403, detail="Only admin or sales can delete sales persons.")
     conn = create_connection()
     cursor = conn.cursor()
     try:
@@ -1053,46 +1063,85 @@ def estimate_pdf_memory(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Error estimating memory: {str(e)}")
 
 
-@app.put("/Chatuser/update")
-def update_users(
-    # name: str = Form(None),
-    email: str = Form(...),
-    status: str = Form(None),
-    description: str = Form(None)
-):
-    if not is_privileged_authenticated() or session_state.get("role", "").lower() not in ["admin", "sales"]:
-        raise HTTPException(status_code=403, detail="Only admin or sales can update user status and description.")
-    conn = create_connection()
-    cursor = conn.cursor()
-    try:
-        # Build dynamic update query
-        fields = []
-        values = []
-        if status is not None:
-            fields.append("status = %s")
-            values.append(status)
-        if description is not None:
-            fields.append("description = %s")
-            values.append(description)
-        # if role is not None:
-        #     fields.append("role = %s")
-        #     values.append(role)
-        if not fields:
-            return {"failed": False, "message": "need to update status or description"}
-        values.append(email)
-        query = f"UPDATE users SET {', '.join(fields)} WHERE LOWER(email) = LOWER(%s)"
-        cursor.execute(query, tuple(values))
-        if cursor.rowcount == 0:
-            return {"success": False, "message": f"No chat user found with email '{email}'."}
-        conn.commit()
-        return {"success": True, "message": f"chat user '{email}' updated successfully."}
-    except Exception as e:
-        conn.rollback()
-        return {"success": False, "message": f"Error: {str(e)}"}
-    finally:
-        conn.close()
+# @app.put("/Chatuser/update")
+# def update_users(
+#     # name: str = Form(None),
+#     email: str = Form(...),
+#     status: str = Form(None),
+#     description: str = Form(None)
+# ):
+#     if not is_privileged_authenticated() or session_state.get("role", "").lower() not in ["admin", "sales"]:
+#         raise HTTPException(status_code=403, detail="Only admin or sales can update user status and description.")
+    
+#     # Get the current user's email who is making the update
+#     current_user_email = session_state.get("admin_email_attempt", "unknown")
+    
+#     # Use the new tracking function
+#     result = update_user_with_tracking(
+#         email=email,
+#         status=status,
+#         description=description,
+#         updated_by_email=current_user_email
+#     )
+    
+#     return result
 
-@app.post("/chat/summary")
+# @app.get("/Chatuser/update-history")
+# def get_user_update_history_endpoint(email: str = Query(...)):
+#     """Get the update history for a specific user"""
+#     if not is_privileged_authenticated() or session_state.get("role", "").lower() not in ["admin", "sales"]:
+#         raise HTTPException(status_code=403, detail="Only admin or sales can view user update history.")
+    
+#     from db import get_user_update_history
+#     history = get_user_update_history(email)
+    
+#     return {
+#         "success": True,
+#         "email": email,
+#         "update_history": history
+#     }
+
+# # 
+
+@app.put("/Chatuser/update")
+def update_user_and_get_history(
+    email: str = Form(...),
+    status: Optional[str] = Form(None),
+    description: Optional[str] = Form(None)
+):
+    # Extract user identity from session
+    user_email = session_state.get("email", "unknown")
+    role = session_state.get("role", "unknown").lower()
+
+    # Authorization check (only allow admin or sales to update)
+    if not is_privileged_authenticated() or role not in ["admin", "sales"]:
+        raise HTTPException(status_code=403, detail="Only admin or sales can update user status and description.")
+    
+    # Format updated_by as "role (email)"
+    updated_by = f"{role} ({user_email})"
+
+    # Perform update and track
+    from db import update_user_with_tracking, get_user_update_history
+    update_result = update_user_with_tracking(
+        email=email,
+        status=status,
+        description=description,
+        updated_by_email=updated_by
+    )
+
+    # Get update history
+    update_history = get_user_update_history(email)
+
+    # Response
+    return {
+        "success": True,
+        "message": "User updated successfully",
+        "updated_by": updated_by,
+        "email": email,
+        "update_result": update_result,
+        "update_history": update_history
+    }
+
 def generate_summary_internal(email):
     # Step 1: Fetch user's chat history
     conn = create_connection()
