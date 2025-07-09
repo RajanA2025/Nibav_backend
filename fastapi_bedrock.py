@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 from db import setup_database, save_user_info, get_user_count, save_interaction, user_exists, create_connection
+from db import update_user_with_tracking, get_user_update_history
 from bedrock_search import initialize_bedrock_index, get_answer_bedrock, add_pdf_to_bedrock_index, generate_answer_with_bedrock
 from bedrock_faiss_indexer import BedrockFAISSIndexer
 from datetime import datetime, timedelta
@@ -25,6 +26,7 @@ import urllib.parse
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from typing import Literal
 
 app = FastAPI()
 
@@ -466,7 +468,7 @@ def user_register(
 
     # 3. Rebuild bedrock indexer from current files
     bedrock_indexer = initialize_bedrock_index()
-    results = bedrock_indexer.search(user_query, k=3, threshold=0.15)
+    results = bedrock_indexer.search(user_query, k=3, threshold=0.25)
 
     if results:
         best_doc, _ = results[0]
@@ -630,7 +632,7 @@ def search_branch_in_data(location, query):
                         f"Address: {branch['address']}.\n"
                         f"Phone: {branch['phone']}.\n"
                         f"Email: {branch['email']}.\n"
-                        f"More info: {search_url}"
+                        f" visit: {search_url}"
                     )
                 else:
                     result = f"Nibav Lifts has {len(matching_branches)} branches in {location.title()}:\n"
@@ -638,6 +640,7 @@ def search_branch_in_data(location, query):
                         result += f"{i}. {branch['city']}, {branch['state']} - {branch['address']}. Phone: {branch['phone']}\n"
                     search_url = f"https://www.bing.com/search?q=nibav+lifts+{location.lower().replace(' ', '+')}"
                     result += f"\nFor more details, visit : {search_url}"
+                    
                     return result
                 # if len(matching_branches) == 1:
                 #     branch = matching_branches[0]
@@ -921,10 +924,14 @@ def create_sales_person(
     name: str = Form(...),
     email: str = Form(...),
     password: str = Form(...),
-    role: str = Form(...)
+    role: Literal["Admin", "Sales"] = Form(...) 
+ 
+
 ):
-    if not is_privileged_authenticated() or session_state.get("role", "").lower() not in ["admin", "sales"]:
-        raise HTTPException(status_code=403, detail="Only admin or sales can create sales persons.")
+    # if not is_privileged_authenticated() or session_state.get("role", "").lower() not in ["admin", "sales"]:
+    #     raise HTTPException(status_code=403, detail="Only admin or sales can create sales persons.")
+    if not is_privileged_authenticated() or session_state.get("role", "").lower() != "admin":  # Fixed: use lowercase
+        raise HTTPException(status_code=403, detail="Only admin can upload files.")
     conn = create_connection()
     cursor = conn.cursor()
     try:
@@ -948,8 +955,10 @@ def update_sales_person(
     password: str = Form(None),
     role: str = Form(None)
 ):
-    if not is_privileged_authenticated() or session_state.get("role", "").lower() not in ["admin", "sales"]:
-        raise HTTPException(status_code=403, detail="Only admin or sales can update sales persons.")
+    # if not is_privileged_authenticated() or session_state.get("role", "").lower() not in ["admin", "sales"]:
+    #     raise HTTPException(status_code=403, detail="Only admin or sales can update sales persons.")
+    if not is_privileged_authenticated() or session_state.get("role", "").lower() != "admin":  # Fixed: use lowercase
+        raise HTTPException(status_code=403, detail="Only admin can upload files.")
     conn = create_connection()
     cursor = conn.cursor()
     try:
@@ -982,8 +991,10 @@ def update_sales_person(
 
 @app.delete("/user/delete")
 def delete_sales_person(email: str = Form(...)):
-    if not is_privileged_authenticated() or session_state.get("role", "").lower() not in ["admin", "sales"]:
-        raise HTTPException(status_code=403, detail="Only admin or sales can delete sales persons.")
+    # if not is_privileged_authenticated() or session_state.get("role", "").lower() not in ["admin", "sales"]:
+    #     raise HTTPException(status_code=403, detail="Only admin or sales can delete sales persons.")
+    if not is_privileged_authenticated() or session_state.get("role", "").lower() != "admin":  # Fixed: use lowercase
+        raise HTTPException(status_code=403, detail="Only admin can upload files.")
     conn = create_connection()
     cursor = conn.cursor()
     try:
