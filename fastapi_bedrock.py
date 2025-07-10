@@ -940,7 +940,7 @@ def create_sales_person(
             (name, email, password, role)
         )
         conn.commit()
-        return {"success": True, "message": f"Sales person '{email}' created successfully."}
+        return {"success": True, "message": f"Admin person '{email}' created successfully."}
     except Exception as e:
         conn.rollback()
         if "unique constraint" in str(e).lower() or "duplicate key" in str(e).lower():
@@ -994,18 +994,30 @@ def delete_sales_person(email: str = Form(...)):
     # if not is_privileged_authenticated() or session_state.get("role", "").lower() not in ["admin", "sales"]:
     #     raise HTTPException(status_code=403, detail="Only admin or sales can delete sales persons.")
     if not is_privileged_authenticated() or session_state.get("role", "").lower() != "admin":  # Fixed: use lowercase
-        raise HTTPException(status_code=403, detail="Only admin can upload files.")
+        raise HTTPException(status_code=403, detail="Only admin can delete users.")
     conn = create_connection()
     cursor = conn.cursor()
     try:
+        # First, get the role of the person being deleted
+        cursor.execute(
+            "SELECT role FROM sales_persons_data WHERE email = %s",
+            (email,)
+        )
+        result = cursor.fetchone()
+        if not result:
+            return {"success": False, "message": f"No user found with email '{email}'."}
+        
+        user_role = result[0]  # Get the role (Admin or Sales)
+        
+        # Now delete the user
         cursor.execute(
             "DELETE FROM sales_persons_data WHERE email = %s",
             (email,)
         )
         if cursor.rowcount == 0:
-            return {"success": False, "message": f"No sales person found with email '{email}'."}
+            return {"success": False, "message": f"No user found with email '{email}'."}
         conn.commit()
-        return {"success": True, "message": f"Sales person '{email}' deleted successfully."}
+        return {"success": True, "message": f"{user_role} person '{email}' deleted successfully."}
     except Exception as e:
         conn.rollback()
         return {"success": False, "message": f"Error: {str(e)}"}
