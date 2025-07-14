@@ -1,3 +1,6 @@
+
+
+
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Query, Body
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -319,6 +322,7 @@ def get_userschat_list():
             latest.chat_time,
             u.status,
             u.description,
+            u.summary,
             u.updated_by,
             u.updated_at
         FROM users u
@@ -342,8 +346,11 @@ def get_userschat_list():
                 "chat_time": datetime.strptime(str(u[3]), "%H:%M:%S.%f").strftime("%H:%M") if u[3] else None,
                 "status": u[4],
                 "description": u[5],
-                "updated_by": u[6],
-                "updated_at": u[7].isoformat() if u[7] else None
+                   "summary":u[6],
+                "updated_by": u[7],
+
+                "updated_at": u[8].isoformat() if u[7] else None,
+             
             } for u in users
         ]
     }
@@ -468,7 +475,7 @@ def user_register(
 
     # 3. Rebuild bedrock indexer from current files
     bedrock_indexer = initialize_bedrock_index()
-    results = bedrock_indexer.search(user_query, k=3, threshold=0.25)
+    results = bedrock_indexer.search(user_query, k=3, threshold=0.5)
 
     if results:
         best_doc, _ = results[0]
@@ -642,14 +649,7 @@ def search_branch_in_data(location, query):
                     result += f"\nFor more details, visit : {search_url}"
                     
                     return result
-                # if len(matching_branches) == 1:
-                #     branch = matching_branches[0]
-                #     return f"Nibav Lifts has a branch in {branch['city']}, {branch['state']}. Address: {branch['address']}. Phone: {branch['phone']}. Email: {branch['email']}."
-                # else:
-                #     result = f"Nibav Lifts has {len(matching_branches)} branches in {location.title()}:\n"
-                #     for i, branch in enumerate(matching_branches, 1):
-                #         result += f"{i}. {branch['city']}, {branch['state']} - {branch['address']}. Phone: {branch['phone']}\n"
-                #     return result
+            
             else:
                 return (
                     f"It appears there are no Nibav lift branches currently in {location.title()}. "
@@ -690,6 +690,7 @@ def chat(email: str = Form(...), user_query: str = Form(...)):
         "hey": "Hey there! How can I help you?",
         "good morning": "Good morning! How can I assist you today?",
         "how are you": "I'm just a bot, but I'm here to help you! How can I assist you?",
+        "whats your name ": "I'm your assistant bot, here to help you with your queries!", 
         "who are you": "I'm your assistant bot, here to help you with your queries!",
         "how you help me": "I can answer your questions from uploaded documents. How can I help you today?",
         "ok": "Ok, how can I help you today?",
@@ -713,12 +714,17 @@ def chat(email: str = Form(...), user_query: str = Form(...)):
     # --- Handle branch queries ---
     if any(keyword in user_query_lower for keyword in ["branch", "branches", "location", "locations", "office", "offices"]):
         location = extract_location_from_query(user_query)
-        branch_info = search_branch_in_data(location, user_query) if location else search_branch_in_data(None, user_query)
+        if not location:
+            # No location found, ask for clarification
+            msg = "There are many branches. Can you specify which city or location you are interested in?"
+            save_interaction(email, user_query, msg)
+            update_summary_if_needed(email)
+            return {"long_desc": msg}
+        branch_info = search_branch_in_data(location, user_query)
         if branch_info:
             save_interaction(email, user_query, branch_info)
-            # ✅ Check and trigger summary
             update_summary_if_needed(email)
-            return {"long_desc": branch_info }  #, "more_available": False}
+            return {"long_desc": branch_info}
 
     # --- Check if files exist ---
     data_dir = "data"
@@ -789,18 +795,36 @@ def chat(email: str = Form(...), user_query: str = Form(...)):
 
 
 def update_summary_if_needed(email):
-    try:
-        conn = create_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM chat_history WHERE email = %s", (email,))
-        count = cursor.fetchone()[0]
-        conn.close()
+    # Fetch last 3 questions
+    conn = create_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_query FROM chat_history WHERE email = %s ORDER BY id DESC LIMIT 3", (email,))
+    last_questions = [row[0] for row in cursor.fetchall()]
+    conn.close()
 
-        if count >= 2:
-            print(f"Triggering summary for {email}...")
-            generate_summary_internal(email)
-    except Exception as e:
-        print(f"Summary update error: {e}")
+    if not last_questions or len(last_questions) < 3:
+        # Not enough questions to summarize
+        return
+
+    # Combine last 3 questions into a single text blob (chronological order)
+    chat_text = " ".join(reversed(last_questions)).lower()
+
+    # Rule-based tagging
+    if any(word in chat_text for word in ["price", "cost", "buy", "purchase", "quotation", "quote"]):
+        summary = "User appears to be interested in purchasing a lift."
+    elif any(word in chat_text for word in ["problem", "issue", "repair", "not working", "support"]):
+        summary = "User is mostly making support-related queries."
+    elif any(word in chat_text for word in ["branch", "location", "city", "state", "office"]):
+        summary = "User is enquiring about branches and locations."
+    else:
+        summary = "User is asking general questions."
+
+    # Update the summary column in users table
+    conn = create_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET summary = %s WHERE email = %s", (summary, email))
+    conn.commit()
+    conn.close()
 
 
 
@@ -924,7 +948,7 @@ def create_sales_person(
     name: str = Form(...),
     email: str = Form(...),
     password: str = Form(...),
-    role: Literal["Admin", "Sales"] = Form(...) 
+    role: str= Form(...) 
  
 
 ):
@@ -982,7 +1006,7 @@ def update_sales_person(
         if cursor.rowcount == 0:
             return {"success": False, "message": f"No sales person found with email '{email}'."}
         conn.commit()
-        return {"success": True, "message": f"Sales person '{email}' updated successfully."}
+        return {"success": True, "message": f"Admin person '{email}' updated successfully."}
     except Exception as e:
         conn.rollback()
         return {"success": False, "message": f"Error: {str(e)}"}
@@ -994,28 +1018,16 @@ def delete_sales_person(email: str = Form(...)):
     # if not is_privileged_authenticated() or session_state.get("role", "").lower() not in ["admin", "sales"]:
     #     raise HTTPException(status_code=403, detail="Only admin or sales can delete sales persons.")
     if not is_privileged_authenticated() or session_state.get("role", "").lower() != "admin":  # Fixed: use lowercase
-        raise HTTPException(status_code=403, detail="Only admin can delete users.")
+        raise HTTPException(status_code=403, detail="Only admin can upload files.")
     conn = create_connection()
     cursor = conn.cursor()
     try:
-        # First, get the role of the person being deleted
-        cursor.execute(
-            "SELECT role FROM sales_persons_data WHERE email = %s",
-            (email,)
-        )
-        result = cursor.fetchone()
-        if not result:
-            return {"success": False, "message": f"No user found with email '{email}'."}
-        
-        user_role = result[0]  # Get the role (Admin or Sales)
-        
-        # Now delete the user
         cursor.execute(
             "DELETE FROM sales_persons_data WHERE email = %s",
             (email,)
         )
         if cursor.rowcount == 0:
-            return {"success": False, "message": f"No user found with email '{email}'."}
+            return {"success": False, "message": f"No sales person found with email '{email}'."}
         conn.commit()
         return {"success": True, "message": f"{user_role} person '{email}' deleted successfully."}
     except Exception as e:
