@@ -10,6 +10,7 @@ import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import hashlib
 
 # For PDF processing
 try:
@@ -19,14 +20,15 @@ except ImportError:
     PDF_AVAILABLE = False
 
 class BedrockFAISSIndexer:
-    def __init__(self, region_name: str = "ap-south-1", max_requests_per_second: int = 8):
+    def __init__(self, index_path: str = "bedrock_faiss_index", region_name: str = "ap-south-1", max_requests_per_second: int = 8):
         """
         Initialize FAISS indexer with AWS Bedrock embeddings (Mumbai region)
-        
         Args:
+            index_path: Path prefix for FAISS index and document files
             region_name: AWS region for Bedrock (ap-south-1 for Mumbai)
             max_requests_per_second: Rate limit for Bedrock API calls (default: 8 to be safe)
         """
+        self.index_path = index_path
         self.bedrock = boto3.client(
             service_name='bedrock-runtime',
             region_name=region_name
@@ -35,6 +37,14 @@ class BedrockFAISSIndexer:
         self.documents = []
         self.max_requests_per_second = max_requests_per_second
         self.last_request_time = 0
+        # Load or initialize index
+        if os.path.exists(f"{self.index_path}.faiss") and os.path.exists(f"{self.index_path}_documents.pkl"):
+            self.index = faiss.read_index(f"{self.index_path}.faiss")
+            with open(f"{self.index_path}_documents.pkl", "rb") as f:
+                self.documents = pickle.load(f)
+        else:
+            self.index = None
+            self.documents = []
         
     def _rate_limited_request(self):
         """Ensure we don't exceed rate limits"""
@@ -141,15 +151,58 @@ class BedrockFAISSIndexer:
         
         return np.array(embeddings, dtype=np.float32)
         
+    def _get_cache_path(self, data_path: str) -> str:
+        base = os.path.basename(data_path)
+        return os.path.join(os.path.dirname(data_path), base + ".embeddings.pkl")
+
+    def _file_hash(self, path: str) -> str:
+        # Hash file contents to detect changes
+        h = hashlib.sha256()
+        with open(path, 'rb') as f:
+            while True:
+                chunk = f.read(8192)
+                if not chunk:
+                    break
+                h.update(chunk)
+        return h.hexdigest()
+
+    def _save_cache(self, data_path: str, embeddings: np.ndarray, documents: list):
+        cache_path = self._get_cache_path(data_path)
+        file_hash = self._file_hash(data_path)
+        with open(cache_path, 'wb') as f:
+            pickle.dump({'embeddings': embeddings, 'documents': documents, 'file_hash': file_hash}, f)
+
+    def _load_cache(self, data_path: str):
+        cache_path = self._get_cache_path(data_path)
+        if not os.path.exists(cache_path):
+            return None
+        file_hash = self._file_hash(data_path)
+        with open(cache_path, 'rb') as f:
+            data = pickle.load(f)
+        if data.get('file_hash') == file_hash:
+            return data['embeddings'], data['documents']
+        return None
+
     def process_csv(self, csv_path: str, text_column: str = "Question", 
                    answer_column: str = "Concise Answer (bot default)",
                    details_column: str = 'Details if user asks "Tell me more"') -> None:
-        """
-        Process CSV file and add to FAISS index using Bedrock embeddings (no chunking)
-        """
+        # Try cache first
+        cache = self._load_cache(csv_path)
+        if cache:
+            embeddings, documents = cache
+            self.documents.extend(documents)
+            if self.index is None:
+                dimension = embeddings.shape[1]
+                self.index = faiss.IndexFlatIP(dimension)
+            embeddings = embeddings.astype(np.float32)
+            faiss.normalize_L2(embeddings)
+            self.index.add(embeddings)
+            logging.info(f"✅ Loaded cached embeddings for {csv_path}")
+            return
         try:
             df = pd.read_csv(csv_path)
             texts = []
+            documents = []
             for _, row in df.iterrows():
                 question = str(row.get(text_column, ""))
                 answer = str(row.get(answer_column, ""))
@@ -180,14 +233,14 @@ class BedrockFAISSIndexer:
                 combined_text = f"{question} {cleaned_answer} {details}".strip()
                 if combined_text:
                     texts.append(combined_text)
-                    self.documents.append({
+                    documents.append({
                         'question': question,
                         'answer': cleaned_answer,
                         'details': details,
                         'text': combined_text,
                         'source': 'csv',
                         'chunk': 1,
-                        'row_index': len(self.documents)
+                        'row_index': len(self.documents) + len(documents)
                     })
             if texts:
                 embeddings = self.get_embeddings_batch(texts)
@@ -197,7 +250,9 @@ class BedrockFAISSIndexer:
                 embeddings = embeddings.astype(np.float32)
                 faiss.normalize_L2(embeddings)
                 self.index.add(embeddings)
-                logging.info(f"✅ Successfully indexed {len(texts)} CSV rows (no chunking)")
+                self.documents.extend(documents)
+                self._save_cache(csv_path, embeddings, documents)
+                logging.info(f"✅ Successfully indexed {len(texts)} CSV rows (no chunking) and cached.")
         except Exception as e:
             logging.error(f"❌ Error processing CSV: {str(e)}")
             raise
@@ -339,9 +394,9 @@ class BedrockFAISSIndexer:
                         if cleaned_text.strip():
                             is_table = self._detect_table_content(cleaned_text)
                             if is_table:
-                                chunks = self._chunk_text(cleaned_text, max_chunk_size=400, overlap=50)
+                                chunks = self._chunk_text(cleaned_text, max_chunk_size=100, overlap=50)
                             else:
-                                chunks = self._chunk_text(cleaned_text, max_chunk_size=300, overlap=150)
+                                chunks = self._chunk_text(cleaned_text, max_chunk_size=100, overlap=50)
                             total_chunks += len(chunks)
                             total_text_length += len(cleaned_text)
                 
@@ -413,16 +468,26 @@ class BedrockFAISSIndexer:
                 
         except Exception as e:
             return {"error": f"Error estimating CSV memory: {str(e)}"}
-
+    
     def process_pdf(self, pdf_path: str) -> None:
-        """
-        Process PDF file and add to FAISS index using Bedrock embeddings
-        Handles both text-based and table-formatted PDFs
-        """
+        # Try cache first
+        cache = self._load_cache(pdf_path)
+        if cache:
+            embeddings, documents = cache
+            self.documents.extend(documents)
+            if self.index is None:
+                dimension = embeddings.shape[1]
+                self.index = faiss.IndexFlatIP(dimension)
+            embeddings = embeddings.astype(np.float32)
+            faiss.normalize_L2(embeddings)
+            self.index.add(embeddings)
+            logging.info(f"✅ Loaded cached embeddings for {pdf_path}")
+            return
         if not PDF_AVAILABLE:
             raise ImportError("PyPDF2 is required for PDF processing. Install with: pip install PyPDF2")
         try:
             texts = []
+            documents = []
             with open(pdf_path, 'rb') as file:
                 pdf_reader = PyPDF2.PdfReader(file)
                 for page_num, page in enumerate(pdf_reader.pages):
@@ -430,21 +495,18 @@ class BedrockFAISSIndexer:
                     if text and text.strip():
                         cleaned_text = self._clean_pdf_text(text)
                         if cleaned_text.strip():
-                            is_table = self._detect_table_content(cleaned_text)
-                            if is_table:
-                                chunks = self._chunk_text(cleaned_text, max_chunk_size=400, overlap=50)
-                            else:
-                                chunks = self._chunk_text(cleaned_text, max_chunk_size=300, overlap=150)
+                            # Always use chunk size 100 and overlap 50
+                            chunks = self._chunk_text(cleaned_text, max_chunk_size=100, overlap=50)
                             for chunk_idx, chunk in enumerate(chunks):
                                 if chunk.strip() and len(chunk) > 20:
                                     texts.append(chunk)
-                                    self.documents.append({
+                                    documents.append({
                                         'text': chunk,
                                         'source': 'pdf',
                                         'page': page_num + 1,
                                         'chunk': chunk_idx + 1,
-                                        'row_index': len(self.documents),
-                                        'is_table': is_table
+                                        'row_index': len(self.documents) + len(documents),
+                                        'is_table': False
                                     })
             if texts:
                 embeddings = self.get_embeddings_batch(texts)
@@ -454,7 +516,9 @@ class BedrockFAISSIndexer:
                 embeddings = embeddings.astype(np.float32)
                 faiss.normalize_L2(embeddings)
                 self.index.add(embeddings)
-                logging.info(f"✅ Successfully indexed {len(texts)} PDF chunks")
+                self.documents.extend(documents)
+                self._save_cache(pdf_path, embeddings, documents)
+                logging.info(f"✅ Successfully indexed {len(texts)} PDF chunks and cached.")
         except Exception as e:
             logging.error(f"❌ Error processing PDF: {str(e)}")
             raise
@@ -489,39 +553,32 @@ class BedrockFAISSIndexer:
         
         return results
     
-    def save_index(self, index_path: str = "bedrock_faiss_index") -> None:
+    def save_index(self, index_path: str = None) -> None:
         """
         Save FAISS index and documents to disk
-        
         Args:
-            index_path: Base path for saving files
+            index_path: Base path for saving files (optional, defaults to self.index_path)
         """
         if self.index is None:
             raise ValueError("No index to save")
-        
-        # Save FAISS index
+        if index_path is None:
+            index_path = self.index_path
         faiss.write_index(self.index, f"{index_path}.faiss")
-        
-        # Save documents metadata
         with open(f"{index_path}_documents.pkl", 'wb') as f:
             pickle.dump(self.documents, f)
-        
         logging.info(f"✅ Index saved to {index_path}")
     
-    def load_index(self, index_path: str = "bedrock_faiss_index") -> None:
+    def load_index(self, index_path: str = None) -> None:
         """
         Load FAISS index and documents from disk
-        
         Args:
-            index_path: Base path for loading files
+            index_path: Base path for loading files (optional, defaults to self.index_path)
         """
-        # Load FAISS index
+        if index_path is None:
+            index_path = self.index_path
         self.index = faiss.read_index(f"{index_path}.faiss")
-        
-        # Load documents metadata
         with open(f"{index_path}_documents.pkl", 'rb') as f:
             self.documents = pickle.load(f)
-        
         logging.info(f"✅ Index loaded from {index_path}")
     
     def get_stats(self) -> dict:
@@ -540,65 +597,23 @@ class BedrockFAISSIndexer:
             "dimension": self.index.d,
             "sources": list(set(doc.get('source', 'unknown') for doc in self.documents))
         }
-    
-    def _chunk_text(self, text: str, max_chunk_size: int = 600, overlap: int = 100) -> List[str]:
+
+    def _chunk_text(self, text: str, max_chunk_size: int = 100, overlap: int = 50) -> List[str]:
         """
         Split text into overlapping chunks for better semantic search
-        
-        Args:
-            text: Text to chunk
-            max_chunk_size: Maximum size of each chunk
-            overlap: Overlap between chunks
-            
-        Returns:
-            List of text chunks
         """
         if len(text) <= max_chunk_size:
             return [text]
-        
         chunks = []
         start = 0
-        
         while start < len(text):
             end = start + max_chunk_size
-            
-            # Try to break at semantic boundaries
-            if end < len(text):
-                # Priority 1: Look for paragraph breaks (double newlines)
-                for i in range(end, max(start + max_chunk_size - 200, start), -1):
-                    if text[i:i+2] == '\n\n':
-                        end = i + 2
-                        break
-                
-                # Priority 2: Look for sentence endings
-                if end == start + max_chunk_size:
-                    for i in range(end, max(start + max_chunk_size - 150, start), -1):
-                        if text[i] in '.!?':
-                            end = i + 1
-                            break
-                
-                # Priority 3: Look for single newlines
-                if end == start + max_chunk_size:
-                    for i in range(end, max(start + max_chunk_size - 100, start), -1):
-                        if text[i] == '\n':
-                            end = i + 1
-                            break
-                
-                # Priority 4: Look for common separators
-                if end == start + max_chunk_size:
-                    for i in range(end, max(start + max_chunk_size - 50, start), -1):
-                        if text[i] in ';:':
-                            end = i + 1
-                            break
-            
             chunk = text[start:end].strip()
-            if chunk and len(chunk) > 20:  # Only meaningful chunks (reduced threshold for tables)
+            if chunk and len(chunk) > 20:
                 chunks.append(chunk)
-            
             start = end - overlap
             if start >= len(text):
                 break
-        
         return chunks 
     
     def _clean_pdf_text(self, text: str) -> str:
